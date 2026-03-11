@@ -1,0 +1,663 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Volume by Cross-Sections</title>
+<style>
+  body { font-family: system-ui, Arial; margin: 16px; }
+  .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;}
+  canvas { border:1px solid #ccc; border-radius:10px; cursor: move; }
+  canvas:active { cursor: move; }
+  button {
+    padding:8px 12px; border-radius:8px; border:1px solid #bbb; background:#fff; cursor:pointer;
+  }
+  button.active { border-color:#333; box-shadow: 0 0 0 2px rgba(0,0,0,0.08) inset; }
+  label { display:inline-flex; gap:8px; align-items:center; }
+  input[type="range"] { width:150px; }
+  .val { min-width:64px; display:inline-block; text-align:right; font-variant-numeric: tabular-nums; }
+  .muted { color:#666; font-size:12px; }
+  #viewVal { margin-left: -30px; }
+  #zoomVal { margin-left: -30px; }
+
+  /* integral area styling */
+  #integralWrap { margin-top:12px; padding:10px; border-top:1px dashed #ddd; }
+  #integralUI { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
+  #integralDisplay { font-size:18px; line-height:1.4; }
+  #integralDisplay .small { font-size:16px; color:#444; margin-top:6px; }
+</style>
+
+<!-- MathJax v3 -->
+<script>
+window.MathJax = {
+  tex: { inlineMath: [['\\(', '\\)'], ['$', '$']] },
+  options: { skipHtmlTags: ['script','style','textarea','pre','code'] }
+};
+</script>
+<script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js" async></script>
+
+</head>
+<body>
+
+<div class="row">
+  <button id="toggle">Rotate to Isometric</button>
+  <button id="reset">Reset</button>
+
+  <label>View
+    <input id="view" type="range" min="0" max="2" step="0.01" value="0.00">
+    <span id="viewVal" class="val">XY</span>
+  </label>
+
+  <label>Zoom
+    <input id="zoom" type="range" min="0.4" max="2.5" step="0.01" value="1.00">
+    <span id="zoomVal" class="val">1.00×</span>
+  </label>
+</div>
+
+<div class="row">
+  <label>Cross-sections
+    <input id="xsCount" type="range" min="0" max="0" step="1" value="0">
+    <span id="xsCountVal" class="val">All</span>
+  </label>
+
+  <label class="muted">
+    <input id="showXS" type="checkbox" checked>
+    Show cross-sections (Δx = 0.25)
+  </label>
+
+  <span class="muted">Slices from x = 0 to x = 4</span>
+</div>
+
+<div class="row">
+  <span class="muted">Shape:</span>
+  <button id="shapeSquare" class="active">Square</button>
+  <button id="shapeRectHalf">Rectangle (H = ½·L)</button>
+  <button id="shapeRectSqrt2">Rectangle (H = 4x-x²)</button>
+
+</div>
+
+<div class="row">
+  <button id="shape454590Top">45-45-90 Leg (T)</button>
+  <button id="shape454590Bot">45-45-90 Leg (B)</button>
+  <button id="shape454590Hyp">45-45-90 Hyp</button>
+</div>
+
+<div class="row">
+  <button id="shape606060">60-60-60</button>
+  <button id="shape306090S">30-60-90 Leg (S)</button>
+  <button id="shape306090L">30-60-90 Leg (L)</button>
+  <button id="shapeSemicircle">Semi-Circle</button>
+</div>
+
+<div class="row">
+  <span class="muted">Left-drag to pan. Double-click to recenter.</span>
+</div>
+
+<canvas id="c" width="720" height="360"></canvas>
+
+<!-- integral UI below canvas -->
+<div id="integralWrap">
+  <div id="integralUI">
+    <label for="intervalSelect">Show interval:</label>
+    <select id="intervalSelect">
+      <option value="0-2">0 → 2</option>
+      <option value="2-4">2 → 4</option>
+      <option value="0-4-piece">0 → 4 (piecewise: 0→2 &amp; 2→4)</option>
+    </select>
+
+    <span class="muted">Integrand shows area of chosen cross-section (in terms of \(L = \text{Top} - \text{Bottom}\)).</span>
+  </div>
+
+  <div id="integralDisplay">
+    <div id="integralTemplate">\( \displaystyle \int_{a}^{b} \big(\text{Area of Cross-Section}(x)\big)\,dx \)</div>
+    <div id="integralFilled" class="small"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+
+  // DOMAIN
+  const xMin = -1;
+  const xMax =  5;
+  const yMin = -1;
+  const yMax =  6;
+  const zMin =  0;
+  const zMax =  6;
+
+  // Centering (by midpoints of x/y min/max)
+  const xCenter = (xMin + xMax) / 2;
+  const yCenter = (yMin + yMax) / 2;
+
+  // Cross-section settings
+  const dxSlice = 0.25;
+
+  // Piecewise top interval endpoints
+  const xsA0 = 0;  // start
+  const xsA1 = 2;  // switch point (inclusive on left piece)
+  const xsB1 = 4;  // end
+
+  // total number of slices (inclusive endpoints)
+  const TOTAL_SLICES = Math.floor((xsB1 - xsA0) / dxSlice + 1e-9) + 1;
+
+  // Example functions (same as your original)
+  const f = (x) => 0.5 * Math.pow(x/2, 2) + 1;          // bottom
+  const g = (x) => 4 - Math.pow((x/2 - 1), 3);          // top for [2,4]
+  const h = (x) => 3*x/2 + 1;                           // top for [0,2]
+
+  // Piecewise top for cross-sections:
+  function topXS(x) {
+    if (x >= xsA0 && x <= xsA1) return h(x);
+    if (x >  xsA1 && x <= xsB1) return g(x);
+    return NaN; // outside region: no cross-section
+  }
+
+  // Pan (pixels)
+  let panX = 0, panY = 0;
+  let dragging = false;
+  let lastMX = 0, lastMY = 0;
+
+  canvas.addEventListener("mousedown", (e) => {
+    if (e.button !== 0) return;
+    dragging = true;
+    lastMX = e.clientX;
+    lastMY = e.clientY;
+  });
+  window.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    panX += (e.clientX - lastMX);
+    panY += (e.clientY - lastMY);
+    lastMX = e.clientX;
+    lastMY = e.clientY;
+  });
+  window.addEventListener("mouseup", () => dragging = false);
+  canvas.addEventListener("dblclick", () => { panX = 0; panY = 0; });
+
+  // Zoom
+  const zoomSlider = document.getElementById("zoom");
+  const zoomVal = document.getElementById("zoomVal");
+  let zoom = 1;
+
+  function setZoom(z) {
+    const mn = parseFloat(zoomSlider.min);
+    const mx = parseFloat(zoomSlider.max);
+    zoom = Math.max(mn, Math.min(mx, z));
+    zoomSlider.value = zoom.toFixed(2);
+    zoomVal.textContent = zoom.toFixed(2) + "×";
+  }
+  zoomSlider.addEventListener("input", (e) => setZoom(parseFloat(e.target.value)));
+  setZoom(0.74);
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    setZoom(zoom * Math.exp(-e.deltaY * 0.0015));
+  }, { passive: false });
+
+  // Cross-section count slider
+  const xsCountSlider = document.getElementById("xsCount");
+  const xsCountVal = document.getElementById("xsCountVal");
+  let xsCount = TOTAL_SLICES; // how many slices to draw (0..TOTAL_SLICES)
+
+  function setXSCount(n) {
+    const nn = Math.max(0, Math.min(TOTAL_SLICES, Math.round(n)));
+    xsCount = nn;
+    xsCountSlider.value = String(nn);
+    xsCountVal.textContent = (nn === TOTAL_SLICES) ? "All" : String(nn);
+  }
+
+  xsCountSlider.min = "0";
+  xsCountSlider.max = String(TOTAL_SLICES);
+  xsCountSlider.step = "1";
+  setXSCount(TOTAL_SLICES);
+  xsCountSlider.addEventListener("input", (e) => setXSCount(parseInt(e.target.value, 10)));
+
+  // View slider: 0 = XY, 1 = ISO, 2 = YZ
+  const viewSlider = document.getElementById("view");
+  const viewVal = document.getElementById("viewVal");
+
+  function viewLabel(v){
+    if (v < 0.5) return "XY ";
+    if (v < 1.5) return "ISO";
+    return "YZ ";
+  }
+
+  function setViewUI(v){
+    viewSlider.value = v.toFixed(2);
+    viewVal.textContent = viewLabel(v);
+  }
+
+  // XY -> ISO -> YZ projection via interpolated basis
+  const theta = Math.PI / 6; // 30°
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+
+  // XY basis
+  const EX_XY  = { x: 1, y: 0 };
+  const EY_XY  = { x: 0, y: 1 };
+  const EZ_XY  = { x: 0, y: 0 }; // z invisible in pure XY
+
+  // ISO basis
+  const EX_ISO = { x: c,  y: -s };
+  const EY_ISO = { x: c,  y:  s };
+  const EZ_ISO = { x: 0,  y:  1 };
+
+  // YZ basis (look down +x axis): x invisible; horizontal = y, vertical = z
+  const EX_YZ  = { x: 0, y: 0 };
+  const EY_YZ  = { x: 1, y: 0 };
+  const EZ_YZ  = { x: 0, y: 1 };
+
+  const BASE_SCALE = 70;
+  const lerp = (a,b,t) => a + (b-a)*t;
+
+  function basisFor(t){
+    // t in [0,2]
+    let ex, ey, ez;
+    if (t <= 1) {
+      const u = t; // XY -> ISO
+      ex = { x: lerp(EX_XY.x,  EX_ISO.x, u), y: lerp(EX_XY.y,  EX_ISO.y, u) };
+      ey = { x: lerp(EY_XY.x,  EY_ISO.x, u), y: lerp(EY_XY.y,  EY_ISO.y, u) };
+      ez = { x: lerp(EZ_XY.x,  EZ_ISO.x, u), y: lerp(EZ_XY.y,  EZ_ISO.y, u) };
+    } else {
+      const u = t - 1; // ISO -> YZ
+      ex = { x: lerp(EX_ISO.x, EX_YZ.x, u), y: lerp(EX_ISO.y, EX_YZ.y, u) };
+      ey = { x: lerp(EY_ISO.x, EY_YZ.x, u), y: lerp(EY_ISO.y, EY_YZ.y, u) };
+      ez = { x: lerp(EZ_ISO.x, EZ_YZ.x, u), y: lerp(EZ_ISO.y, EZ_YZ.y, u) };
+    }
+    return {ex,ey,ez};
+  }
+
+  function project(p, t) {
+    const [x,y,z] = p;
+    const {ex,ey,ez} = basisFor(t);
+
+    const SCALE = BASE_SCALE * zoom;
+
+    const U  = SCALE * (x*ex.x + y*ey.x + z*ez.x);
+    const V  = SCALE * (x*ex.y + y*ey.y + z*ez.y);
+
+    const CX = canvas.width/2  + panX;
+    const CY = canvas.height/2 + panY;
+
+    // center the graph (xCenter, yCenter)
+    const Uc = SCALE * (xCenter*ex.x + yCenter*ey.x);
+    const Vc = SCALE * (xCenter*ex.y + yCenter*ey.y);
+
+    return [ CX + (U - Uc), CY - (V - Vc) ];
+  }
+
+  // Drawing helpers
+  function line3(a,b,t,w=2) {
+    const A = project(a,t), B = project(b,t);
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(A[0], A[1]);
+    ctx.lineTo(B[0], B[1]);
+    ctx.stroke();
+  }
+
+  function arrow3(a,b,t,w=2) {
+    const A = project(a,t), B = project(b,t);
+    ctx.lineWidth = w;
+    ctx.beginPath();
+    ctx.moveTo(A[0], A[1]);
+    ctx.lineTo(B[0], B[1]);
+    ctx.stroke();
+
+    const dx = B[0]-A[0], dy = B[1]-A[1];
+    const ang = Math.atan2(dy, dx);
+    const L = 10;
+    ctx.beginPath();
+    ctx.moveTo(B[0], B[1]);
+    ctx.lineTo(B[0]-L*Math.cos(ang-0.35), B[1]-L*Math.sin(ang-0.35));
+    ctx.lineTo(B[0]-L*Math.cos(ang+0.35), B[1]-L*Math.sin(ang+0.35));
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  function labelAt(worldPoint, text, t, dx=8, dy=-8) {
+    const P = project(worldPoint, t);
+    ctx.fillText(text, P[0] + dx, P[1] + dy);
+  }
+
+  function poly3(points, t, fillStyle, strokeStyle=null, w=1) {
+    const pts = points.map(p => project(p, t));
+    ctx.beginPath();
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath();
+    ctx.fillStyle = fillStyle;
+    ctx.fill();
+    if (strokeStyle) {
+      ctx.strokeStyle = strokeStyle;
+      ctx.lineWidth = w;
+      ctx.stroke();
+    }
+  }
+
+  function plotXY(fn, t, color, x0=xMin, x1=xMax) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+
+    const n = 600;
+    let started = false;
+
+    ctx.beginPath();
+
+    for (let i = 0; i <= n; i++) {
+      const x = x0 + (x1 - x0) * (i / n);
+      const y = fn(x);
+
+      const ok = Number.isFinite(y) && (y >= yMin) && (y <= yMax);
+
+      if (!ok) {
+        started = false;
+        continue;
+      }
+
+      const [px, py] = project([x, y, 0], t);
+      if (!started) {
+        ctx.moveTo(px, py);
+        started = true;
+      } else {
+        ctx.lineTo(px, py);
+      }
+    }
+
+    ctx.stroke();
+  }
+
+  // Cross-section shape selection
+  const btnSquare     = document.getElementById("shapeSquare");
+  const btn454590Top  = document.getElementById("shape454590Top");
+  const btn454590Bot  = document.getElementById("shape454590Bot");
+  const btn454590Hyp  = document.getElementById("shape454590Hyp");
+  const btn606060     = document.getElementById("shape606060");
+  const btn306090S    = document.getElementById("shape306090S");
+  const btn306090L    = document.getElementById("shape306090L");
+  const btnSemicircle = document.getElementById("shapeSemicircle");
+  const btnRectHalf   = document.getElementById("shapeRectHalf");
+  const btnRectSqrt2   = document.getElementById("shapeRectSqrt2");
+
+  let shape = "square";
+  function setShape(s) {
+    shape = s;
+    btnSquare.classList.toggle("active", shape === "square");
+    btn454590Top.classList.toggle("active", shape === "454590Top");
+    btn454590Bot.classList.toggle("active", shape === "454590Bot");
+    btn454590Hyp.classList.toggle("active", shape === "454590Hyp");
+    btn606060.classList.toggle("active", shape === "606060");
+    btn306090S.classList.toggle("active", shape === "306090S");
+    btn306090L.classList.toggle("active", shape === "306090L");
+    btnSemicircle.classList.toggle("active", shape === "semicircle");
+    btnRectHalf.classList.toggle("active", shape === "rectHalf");
+    btnRectSqrt2.classList.toggle("active", shape === "rectSqrt2");
+    // update integral display when shape changes
+    updateIntegral();
+  }
+
+  btnSquare.addEventListener("click", () => setShape("square"));
+  btn454590Top.addEventListener("click", () => setShape("454590Top"));
+  btn454590Bot.addEventListener("click", () => setShape("454590Bot"));
+  btn454590Hyp.addEventListener("click", () => setShape("454590Hyp"));
+  btn606060.addEventListener("click", () => setShape("606060"));
+  btn306090S.addEventListener("click", () => setShape("306090S"));
+  btn306090L.addEventListener("click", () => setShape("306090L"));
+  btnSemicircle.addEventListener("click", () => setShape("semicircle"));
+  btnRectHalf.addEventListener("click", () => setShape("rectHalf"));
+  btnRectSqrt2.addEventListener("click", () => setShape("rectSqrt2"));
+
+  const showXS = document.getElementById("showXS");
+
+  function drawCrossSections(t) {
+    if (!showXS.checked) return;
+    if (xsCount <= 0) return;
+
+    // build x-slice list from x=0 increasing, but draw in descending x for nicer overlap in ISO
+    const xs = [];
+    const maxIndex = xsCount - 1;
+    for (let i = 0; i <= maxIndex; i++) {
+      const x = xsA0 + i * dxSlice;
+      if (x > xsB1 + 1e-9) break;
+      xs.push(+x.toFixed(10));
+    }
+    xs.reverse();
+
+    const fill = "rgba(0,80,255,0.12)";
+    const stroke = "rgba(0,80,255,0.55)";
+
+    for (const x of xs) {
+      const yb = f(x);
+      const yt = topXS(x);
+      const L = yt - yb;
+
+      if (!Number.isFinite(L) || L <= 1e-6) continue;
+
+      if (shape === "square") {
+        poly3([[x, yb, 0],[x, yt, 0],[x, yt, L],[x, yb, L]], t, fill, stroke, 1);
+
+      } else if (shape === "454590Top") {
+        poly3([[x, yb, 0],[x, yt, 0],[x, yt, L]], t, fill, stroke, 1);
+
+      } else if (shape === "454590Bot") {
+        poly3([[x, yb, 0],[x, yt, 0],[x, yb, L]], t, fill, stroke, 1);
+
+      } else if (shape === "454590Hyp") {
+        const yMid = (yb + yt) / 2;
+        const zApex = L / 2;
+        poly3([[x, yb, 0],[x, yt, 0],[x, yMid, zApex]], t, fill, stroke, 1);
+
+      } else if (shape === "606060") {
+        const yMid = (yb + yt) / 2;
+        const zApex = (Math.sqrt(3) / 2) * L;
+        poly3([[x, yb, 0],[x, yt, 0],[x, yMid, zApex]], t, fill, stroke, 1);
+
+      } else if (shape === "306090S") {
+        poly3([[x, yb, 0],[x, yt, 0],[x, yb, L*Math.sqrt(3)]], t, fill, stroke, 1);
+
+      } else if (shape === "306090L") {
+        poly3([[x, yb, 0],[x, yt, 0],[x, yb, L/Math.sqrt(3)]], t, fill, stroke, 1);
+
+      } else if (shape === "semicircle") {
+        const n = 40;
+        const r = L / 2;
+        const yMid = (yb + yt) / 2;
+        const pts = [];
+        for (let i = 0; i <= n; i++) {
+          const ang = -Math.PI/2 + Math.PI*(i/n);
+          const y = yMid + r * Math.sin(ang);
+          const z = r * Math.cos(ang);
+          pts.push([x, y, z]);
+        }
+        pts.push([x, yb, 0]);
+        poly3(pts, t, fill, stroke, 1);
+
+      } else if (shape === "rectHalf") {
+        // Rectangle base between curves (yb->yt), height = (1/2)*L
+        const H = 0.5 * L;
+        if (H <= 1e-6) continue;
+        poly3([[x, yb, 0],[x, yt, 0],[x, yt, H],[x, yb, H]], t, fill, stroke, 1);
+
+      } else if (shape === "rectSqrt2") {
+        // Rectangle base between curves (yb->yt), height = 4*x-x*x
+        let H = (4*x-x*x);
+        if (!Number.isFinite(H) || H <= 1e-6) continue;
+        poly3([[x, yb, 0],[x, yt, 0],[x, yt, H],[x, yb, H]], t, fill, stroke, 1);
+      }
+    }
+  }
+
+  // Animation (uses view parameter in [0,2])
+  let target = 0;   // 0 XY, 1 ISO, 2 YZ
+  let current = 0;
+  let start = null;
+  const duration = 900;
+  const ease = (t) => t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+
+  function draw(t) {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    ctx.font = "16px system-ui";
+    ctx.fillStyle = "#000";
+    ctx.strokeStyle = "#000";
+
+    // Axes with arrowheads
+    arrow3([xMin, 0, 0], [xMax, 0, 0], t, 2.5);
+    arrow3([0, yMin, 0], [0, yMax, 0], t, 2.5);
+    arrow3([0, 0, zMin], [0, 0, zMax], t, 2.5);
+
+    // Axis labels
+    labelAt([xMax + 0.25, 0, 0], "x", t);
+    labelAt([0, yMax + 0.25, 0], "y", t);
+    labelAt([0, 0, zMax + 0.25], "z", t);
+
+    // Grid on XY plane
+    ctx.strokeStyle = "rgba(0,0,0,0.12)";
+    for (let x = Math.ceil(xMin); x <= xMax; x++) line3([x, yMin, 0], [x, yMax, 0], t, 1);
+    for (let y = Math.ceil(yMin); y <= yMax; y++) line3([xMin, y, 0], [xMax, y, 0], t, 1);
+
+    drawCrossSections(t);
+
+    plotXY(f, t, "red");
+    plotXY(h, t, "blue");
+    plotXY(g, t, "green");
+  }
+
+  function animate(ts) {
+    if (start === null) start = ts;
+    const raw = Math.min(1, (ts - start) / duration);
+    const e = ease(raw);
+    const displayed = lerp(current, target, e);
+
+    setViewUI(displayed);
+    draw(displayed);
+
+    if (raw >= 1) { current = target; start = null; }
+    requestAnimationFrame(animate);
+  }
+  requestAnimationFrame(animate);
+
+  // View slider drives the target view directly
+  viewSlider.addEventListener("input", (e) => {
+    target = Math.max(0, Math.min(2, parseFloat(e.target.value)));
+    start = null;
+    document.getElementById("toggle").textContent = (target < 0.5) ? "Rotate to Isometric" : "Rotate to XY";
+  });
+
+  // Buttons (retain existing rotate button behavior)
+  document.getElementById("toggle").addEventListener("click", () => {
+    target = (target < 0.5) ? 1 : 0;
+    start = null;
+    document.getElementById("toggle").textContent = (target < 0.5) ? "Rotate to Isometric" : "Rotate to XY";
+  });
+
+  document.getElementById("reset").addEventListener("click", () => {
+    current = 0;
+    target = 0;
+    start = null;
+    panX = 0;
+    panY = 0;
+    setZoom(0.74);
+    setShape("square");
+    showXS.checked = true;
+    setViewUI(0);
+    setXSCount(TOTAL_SLICES);
+    document.getElementById("toggle").textContent = "Rotate to Isometric";
+    // update integral UI after reset (keeps things in sync)
+    updateIntegral();
+  });
+
+  // initial UI sync
+  setViewUI(0);
+
+  // --- integral wiring ---
+  const intervalSelect = document.getElementById("intervalSelect");
+  const integralFilled = document.getElementById("integralFilled");
+
+  // Helper: latex for functions (keeps them visually clean)
+  const latexBottom = "\\tfrac{1}{2}\\left(\\dfrac{x}{2}\\right)^{2} + 1"; // 0.5*(x/2)^2 + 1
+  const latexTopA  = "\\tfrac{3}{2}x + 1";                           // h(x)
+  const latexTopB  = "4 - \\left(\\dfrac{x}{2} - 1\\right)^{3}";       // g(x)
+
+  // Return latex expression for area given L (as latex) and current shape.
+  function areaLatexFor(Llatex) {
+    // Llatex is string representing (Top - Bottom), e.g. "(4 - ... ) - (1/2 (x/2)^2 + 1)"
+    switch (shape) {
+      case "square":
+        return `\\left(${Llatex}\\right)^{2}`;               // L^2
+      case "rectHalf":
+        return `\\tfrac{1}{2}\\left(${Llatex}\\right)^{2}`;  // (1/2) L^2
+      case "rectSqrt2":
+        // height = (4x - x^2), area = L * (4x - x^2)
+        return `\\left(${Llatex}\\right)\\cdot\\left(4x - x^{2}\\right)`;
+      case "454590Top":
+      case "454590Bot":
+        // isosceles right triangle with legs = L => area = 1/2 L^2
+        return `\\tfrac{1}{2}\\left(${Llatex}\\right)^{2}`;
+      case "454590Hyp":
+        // triangle with hypotenuse = L => area = 1/4 L^2
+        return `\\tfrac{1}{4}\\left(${Llatex}\\right)^{2}`;
+      case "606060":
+        // equilateral triangle: sqrt(3)/4 * L^2
+        return `\\frac{\\sqrt{3}}{4}\\left(${Llatex}\\right)^{2}`;
+      case "306090S":
+        // based on visualization height = L*sqrt(3) so area = 1/2 * L * (L*sqrt(3)) = (sqrt3/2) L^2
+        return `\\frac{\\sqrt{3}}{2}\\left(${Llatex}\\right)^{2}`;
+      case "306090L":
+        // visualization height = L/√3 => area = 1/2 * L * (L/√3) = 1/(2√3) L^2
+        return `\\frac{1}{2\\sqrt{3}}\\left(${Llatex}\\right)^{2}`;
+      case "semicircle":
+        // semicircle of diameter L => (π/8) L^2
+        return `\\frac{\\pi}{2}\\left(\\frac{${Llatex}}{2}\\right)^{2}`;
+      default:
+        return `\\left(${Llatex}\\right)^{2}`;
+    }
+  }
+
+  function buildIntegrandLatexForTop(topLatex) {
+    // L = Top - Bottom
+    const L = `\\left(${topLatex}\\right) - \\left(${latexBottom}\\right)`;
+    const area = areaLatexFor(L);
+    return area;
+  }
+
+  function updateIntegral() {
+    const val = intervalSelect.value;
+
+    // Build filled-in formula depending on selection and current shape:
+    let filledLatex = "";
+    if (val === "0-2") {
+      const integrand = buildIntegrandLatexForTop(latexTopA);
+      filledLatex = `\\displaystyle \\int_{0}^{2} ${integrand}\\,dx`;
+    } else if (val === "2-4") {
+      const integrand = buildIntegrandLatexForTop(latexTopB);
+      filledLatex = `\\displaystyle \\int_{2}^{4} ${integrand}\\,dx`;
+    } else if (val === "0-4-piece") {
+      const integrandA = buildIntegrandLatexForTop(latexTopA);
+      const integrandB = buildIntegrandLatexForTop(latexTopB);
+      filledLatex =
+        `\\displaystyle \\int_{0}^{2} ${integrandA}\\,dx`
+        + `\\; + \\;`
+        + `\\displaystyle \\int_{2}^{4} ${integrandB}\\,dx`;
+    }
+
+    integralFilled.innerHTML = `\\( ${filledLatex} \\)`;
+    if (window.MathJax && window.MathJax.typesetPromise) {
+      window.MathJax.typesetPromise([integralFilled]).catch(() => {});
+    }
+  }
+
+  intervalSelect.addEventListener("change", () => updateIntegral());
+
+  // initial fill
+  updateIntegral();
+
+  // --- end integral wiring ---
+
+})();
+</script>
+</body>
+</html>
